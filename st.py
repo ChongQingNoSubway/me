@@ -7,6 +7,103 @@ from timm.models.layers import DropPath
 # Dependencies: Ensure the following classes are defined in this file or imported correctly
 # from your_module import ResDWC, LayerNorm2d, StokenAttention, Mlp
 
+class SlotAttention(nn.Module):
+    """
+    Slot Attention module from Locatello et al. (NeurIPS 2020).
+
+    Args:
+        num_slots: int, number of slots (K).
+        dim: int, dimensionality of input features and slot vectors (E).
+        iters: int, number of attention iterations (T).
+        eps: float, numerical stability constant.
+    """
+    def __init__(self, num_slots: int, dim: int, iters: int = 3, eps: float = 1e-8):
+        super(SlotAttention, self).__init__()
+        self.num_slots = num_slots
+        self.dim = dim
+        self.iters = iters
+        self.eps = eps
+
+        # Parameters for slot initialization (learnable)
+        self.slots_mu = nn.Parameter(torch.randn(1, num_slots, dim))
+        self.slots_sigma = nn.Parameter(torch.abs(torch.randn(1, num_slots, dim)))
+
+        # Linear maps for computing queries, keys, and values
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim)
+        self.to_v = nn.Linear(dim, dim)
+
+        # GRU for slot update
+        self.gru = nn.GRUCell(dim, dim)
+        # MLP for slot refinement
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Linear(dim * 2, dim)
+        )
+        self.norm_inputs = nn.LayerNorm(dim)
+        self.norm_slots = nn.LayerNorm(dim)
+        self.norm_mlp = nn.LayerNorm(dim)
+
+    def forward(self, inputs: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        """
+        inputs: torch.Tensor of shape (B, N, E)
+        returns:
+            slots: (B, K, E)
+            attn: (B, N, K)
+        """
+        B, N, E = inputs.shape
+        assert E == self.dim, "Input feature dimension must match slot dimension"
+
+        # Normalize inputs
+        x = self.norm_inputs(inputs)
+        # Compute keys and values
+        k = self.to_k(x)   # (B, N, E)
+        v = self.to_v(x)   # (B, N, E)
+
+        # Initialize slots from learned Gaussian parameters
+        slots = self.slots_mu + torch.randn(B, self.num_slots, self.dim, device=inputs.device) * self.slots_sigma
+
+        for _ in range(self.iters):
+            slots_prev = slots
+            slots_norm = self.norm_slots(slots)
+            q = self.to_q(slots_norm)  # (B, K, E)
+            # Scaled dot-product attention
+            q = q * (self.dim ** -0.5)
+
+            # Compute attention logits: (B, N, K)
+            logits = torch.einsum('bne,bke->bnk', k, q)
+            # Attention weights over slots for each input
+            attn = F.softmax(logits, dim=-1) + self.eps  # (B, N, K)
+            # Normalize over inputs for each slot
+            attn_norm = attn / torch.sum(attn, dim=1, keepdim=True)
+
+            # Weighted mean: (B, K, E)
+            updates = torch.einsum('bnk,bne->bke', attn_norm, v)
+
+            # Slot update via GRU
+            slots = self.gru(
+                updates.view(-1, E),
+                slots_prev.view(-1, E)
+            )
+            slots = slots.view(B, self.num_slots, E)
+
+            # MLP refinement
+            slots = slots + self.mlp(self.norm_mlp(slots))
+
+        # Return final slots and last attention (inputs-to-slots)
+        return slots, attn
+
+# Example usage:
+# B, N, E = 2, 64, 128
+# x = torch.randn(B, N, E)\#
+# slot_attn = SlotAttention(num_slots=7, dim=E)
+# slots, attn = slot_attn(x)
+# print(slots.shape)  # -> (2, 7, 128)
+# print(attn.shape)   # -> (2, 64, 7)
+
+
+
 class LearnableSampler(nn.Module):
     """
     Learnable sampler that aggregates an input token sequence of shape (B, N, E)
