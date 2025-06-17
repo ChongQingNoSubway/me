@@ -267,6 +267,29 @@ class StokenAttentionLayerWithSampler(nn.Module):
         # Return spatial map (B, C, H, W)
         return x_spatial, sampled_tokens
 
+
+class SlotSampler(nn.Module):
+    """
+    Sampler using SlotAttention to aggregate an input token sequence of shape (B, N, E)
+    into K representative tokens of shape (B, K, E).
+    """
+    def __init__(self, embed_dim: int, num_samples: int, iters: int = 3, eps: float = 1e-8):
+        super().__init__()
+        # Replace cross-attention with slot attention
+        self.slot_attn = SlotAttention(num_slots=num_samples, dim=embed_dim, iters=iters, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape (B, N, E)
+        Returns:
+            slots: Tensor of shape (B, K, E)
+        """
+        slots, _ = self.slot_attn(x)
+        return slots
+
+
+
 # Debug examples
 if __name__ == "__main__":
     B, N, E = 2, 256, 128
